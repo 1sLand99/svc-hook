@@ -18,7 +18,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#ifdef __FreeBSD__
+#if defined(__FreeBSD__) || defined(__NetBSD__)
 #define PROCFS_MAP "/proc/self/map"
 #else
 #define PROCFS_MAP "/proc/self/maps"
@@ -33,7 +33,7 @@
  * SUPPLEMENTAL: syscall record without syscalls
  */
 #define BM_BACKING_FILE "/tmp/syscall_record"
-#define BM_SIZE (1UL << 9)
+#define BM_SIZE (1UL << 16)
 static char *bm_mem = NULL;
 
 static void bm_init(void) {
@@ -68,8 +68,13 @@ static size_t stage3_size = 0;
 #endif /* SUPPLEMENTAL__FOOTPRINT_RECORD */
 
 extern void do_rt_sigreturn(void);
+#if defined(__FreeBSD__) || defined(__NetBSD__)
+extern long enter_syscall(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                          int64_t, int64_t, int64_t, int64_t);
+#else
 extern long enter_syscall(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
                           int64_t, int64_t);
+#endif
 extern void enter_syscall_end(void);
 extern void asm_syscall_hook(void);
 extern void asm_syscall_hook_end(void);
@@ -123,16 +128,23 @@ void ____asm_impl(void) {
       ".extern syscall_table \n\t"
       ".globl enter_syscall \n\t"
       "enter_syscall: \n\t"
+#if defined(__FreeBSD__) || defined(__NetBSD__)
+      "ldr x8, [sp] \n\t"
+#else
       "mov x8, x6 \n\t"
+#endif
       /*
-       * NOTE: Below assembly is same as "ldr x6, =syscall_table", but lld fails
-       * to resolve relocation R_AARCH64_ABS64. So, we use adrp/ldr instead.
+       * NOTE: Below assembly is same as "ldr x16, =syscall_table", but lld
+       * fails to resolve relocation R_AARCH64_ABS64. So, we use adrp/ldr
+       * instead.
        */
-      "adrp x6, :got:syscall_table \n\t"
-      "ldr x6, [x6, #:got_lo12:syscall_table] \n\t"
-      "ldr x6, [x6] \n\t"
-      "add x6, x6, xzr, lsl #3 \n\t"
-      "br x6 \n\t"
+      "adrp x16, :got:syscall_table \n\t"
+      "ldr x16, [x16, #:got_lo12:syscall_table] \n\t"
+      "ldr x16, [x16] \n\t"
+#if defined(__NetBSD__)
+      "add x16, x16, x8, lsl #3 \n\t"
+#endif
+      "br x16 \n\t"
       ".globl enter_syscall_end \n\t"
       "enter_syscall_end: \n\t");
 
@@ -151,6 +163,7 @@ void ____asm_impl(void) {
       ".globl asm_syscall_hook \n\t"
       "asm_syscall_hook: \n\t"
 
+#if defined(__linux__)
       "cmp x8, #139 \n\t" /* rt_sigreturn */
       "b.eq do_rt_sigreturn \n\t" /* bypass hook */
       "cmp x8, #220 \n\t" /* clone */
@@ -192,6 +205,7 @@ void ____asm_impl(void) {
       /* Copy x0-x30 to cl_args->stack + cl_args->stack_size */
       SAVE_CONTEXT(x15)
       "b do_syscall_hook \n\t"
+#endif /* defined(__linux__) */
 
       "do_syscall_hook: \n\t"
 
@@ -200,12 +214,22 @@ void ____asm_impl(void) {
       PUSH_CONTEXT(sp, CONTEXT_SIZE)
       SAVE_CONTEXT(sp)
 
+  // clang-format off
       /* arguments for syscall_hook */
+#if defined(__FreeBSD__) || defined(__NetBSD__)
+      PUSH_CONTEXT(sp, 16)
+      "stp x8, x14, [sp] \n\t" /* syscall NR and return address */
+#else
       "mov x7, x14 \n\t" /* return address */
       "mov x6, x8 \n\t"  /* syscall NR */
+#endif
+// clang-format on
 
       "bl syscall_hook \n\t"
 
+#if defined(__FreeBSD__) || defined(__NetBSD__)
+      POP_CONTEXT(sp, 16)
+#endif
       RESTORE_CONTEXT(sp)
       POP_CONTEXT(sp, CONTEXT_SIZE)
 
@@ -222,17 +246,56 @@ void ____asm_impl(void) {
       "asm_syscall_hook_end: \n\t");
 }
 
+#if defined(__FreeBSD__) || defined(__NetBSD__)
+static _Thread_local int64_t saved_syscall_x6;
+static _Thread_local int64_t saved_syscall_x7;
+static _Thread_local bool hook_active;
+
+static long enter_syscall_compat(int64_t x0, int64_t x1, int64_t x2, int64_t x3,
+                                 int64_t x4, int64_t x5, int64_t syscall_nr,
+                                 int64_t retptr) {
+  return enter_syscall(x0, x1, x2, x3, x4, x5, saved_syscall_x6,
+                       saved_syscall_x7, syscall_nr, retptr);
+}
+#endif
+
 static long (*hook_fn)(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
-                       int64_t a5, int64_t a6, int64_t a7,
-                       int64_t a8) = enter_syscall;
+                       int64_t a5, int64_t a6, int64_t a7, int64_t a8) =
+#if defined(__FreeBSD__) || defined(__NetBSD__)
+    enter_syscall_compat;
+#else
+    enter_syscall;
+#endif
 
 long syscall_hook(int64_t x0, int64_t x1, int64_t x2, int64_t x3, int64_t x4,
-                  int64_t x5, int64_t x8, /* syscall NR */
+                  int64_t x5,
+#if defined(__FreeBSD__) || defined(__NetBSD__)
+                  int64_t x6, int64_t x7,
+#endif
+                  int64_t x8, /* syscall NR */
                   int64_t retptr) {
 #if SUPPLEMENTAL__SYSCALL_RECORD
   bm_increment(x8);
 #endif /* SUPPLEMENTAL__SYSCALL_RECORD */
+#if defined(__FreeBSD__) || defined(__NetBSD__)
+  const int64_t previous_x6 = saved_syscall_x6;
+  const int64_t previous_x7 = saved_syscall_x7;
+  saved_syscall_x6 = x6;
+  saved_syscall_x7 = x7;
+  long result;
+  if (hook_active) {
+    result = enter_syscall_compat(x0, x1, x2, x3, x4, x5, x8, retptr);
+  } else {
+    hook_active = true;
+    result = hook_fn(x0, x1, x2, x3, x4, x5, x8, retptr);
+    hook_active = false;
+  }
+  saved_syscall_x6 = previous_x6;
+  saved_syscall_x7 = previous_x7;
+  return result;
+#else
   return hook_fn(x0, x1, x2, x3, x4, x5, x8, retptr);
+#endif
 }
 
 static inline size_t align_up(size_t value, size_t align) {
@@ -535,8 +598,16 @@ static void scan_exec_code(char *code, size_t code_size, int mem_prot,
   close(fd);
 }
 
-#ifdef __FreeBSD__
-/* entry point for binary scanning on FreeBSD */
+#if defined(__FreeBSD__) || defined(__NetBSD__)
+#if defined(__FreeBSD__)
+#define BSD_MAP_PROT_FIELD 5
+#define BSD_MAP_COW_FIELD 9
+#else
+#define BSD_MAP_PROT_FIELD 2
+#define BSD_MAP_COW_FIELD 4
+#endif
+
+/* entry point for binary scanning on FreeBSD and NetBSD */
 static void scan_code(void) {
   LIST_INIT(&head);
 
@@ -551,41 +622,36 @@ static void scan_code(void) {
     }
     int mem_prot = 0;
     int i = 0;
-    char from_addr[65] = {0};
-    char to_addr[65] = {0};
+    uintptr_t from_addr = 0;
+    uintptr_t to_addr = 0;
     char *c = strtok(buf, " ");
     while (c != NULL) {
-      switch (i) {
-        case 0:
-          strncpy(from_addr, c, sizeof(from_addr) - 1);
-          break;
-        case 1:
-          strncpy(to_addr, c, sizeof(to_addr) - 1);
-          break;
-        case 5:
-          for (size_t j = 0; j < strlen(c); j++) {
-            if (c[j] == 'r') mem_prot |= PROT_READ;
-            if (c[j] == 'w') mem_prot |= PROT_WRITE;
-            if (c[j] == 'x') mem_prot |= PROT_EXEC;
-          }
-          break;
-        case 9:
-          if (strncmp(c, "COW", 3) == 0) {
-            int64_t from = strtol(&from_addr[0], NULL, 16);
-            int64_t to = strtol(&to_addr[0], NULL, 16);
-            if (mem_prot & PROT_EXEC) {
-              scan_exec_code((char *)from, (size_t)to - from, mem_prot, NULL);
-            }
-          }
-          break;
+      if (i == 0) {
+        from_addr = (uintptr_t)strtoull(c, NULL, 16);
+      } else if (i == 1) {
+        to_addr = (uintptr_t)strtoull(c, NULL, 16);
+      } else if (i == BSD_MAP_PROT_FIELD) {
+        for (size_t j = 0; j < strlen(c); j++) {
+          if (c[j] == 'r') mem_prot |= PROT_READ;
+          if (c[j] == 'w') mem_prot |= PROT_WRITE;
+          if (c[j] == 'x') mem_prot |= PROT_EXEC;
+        }
+      } else if (i == BSD_MAP_COW_FIELD) {
+        if (strcmp(c, "COW") == 0 && (mem_prot & PROT_EXEC)) {
+          assert(from_addr < to_addr);
+          scan_exec_code((char *)from_addr, (size_t)(to_addr - from_addr),
+                         mem_prot, NULL);
+        }
       }
-      if (i == 9) break;
+      if (i == BSD_MAP_COW_FIELD) break;
       c = strtok(NULL, " ");
       i++;
     }
   }
   fclose(fp);
 }
+#undef BSD_MAP_COW_FIELD
+#undef BSD_MAP_PROT_FIELD
 #else
 /* entry point for binary scanning on Linux */
 static void scan_code(void) {
@@ -847,14 +913,20 @@ static void setup_trampoline(void) {
         const uint16_t imm = entry->imms[i];
 
         /*
-         * movz x6, (#imm & 0xffff)
+         * Load the svc immediate without clobbering BSD syscall arguments.
          * movz x14, (#return_pc & 0xffff)
          * movk x14, ((#return_pc >> 16) & 0xffff), lsl 16
          * movk x14, ((#return_pc >> 32) & 0xffff), lsl 32
          * movk x14, ((#return_pc >> 48) & 0xffff), lsl 48
          * b do_jump_asm_syscall_hook
          */
+#if defined(__NetBSD__)
+        code[off++] = gen_movz(8, (imm >> 0) & 0xffff, 0);
+#elif defined(__FreeBSD__)
+        code[off++] = gen_movz(9, (imm >> 0) & 0xffff, 0);
+#else
         code[off++] = gen_movz(6, (imm >> 0) & 0xffff, 0);
+#endif
         code[off++] = gen_movz(14, (return_pc >> 0) & 0xffff, 0);
         code[off++] = gen_movk(14, (return_pc >> 16) & 0xffff, 16);
         code[off++] = gen_movk(14, (return_pc >> 32) & 0xffff, 32);
