@@ -22,7 +22,7 @@ CFLAGS += -fPIC
 CFLAGS += -DSUPPLEMENTAL__SYSCALL_RECORD=$(SYSCALL_RECORD)
 CFLAGS += -DSUPPLEMENTAL__FOOTPRINT_RECORD=$(FOOTPRINT_RECORD)
 
-LIBDL ?= -ldl
+LIBDL ?=
 LDFLAGS += -shared
 LDFLAGS += -rdynamic
 LDFLAGS += $(LIBDL)
@@ -33,7 +33,7 @@ OBJS = $(C_SRCS:.c=.o)
 all: $(PROGS)
 
 $(PROGS): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
 
 clean:
 	-@rm -rf $(CLEANFILES)

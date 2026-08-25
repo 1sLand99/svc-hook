@@ -78,7 +78,7 @@ jobs:
           export PATH=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
           make clean
           make -C apps/basic clean
-          make
+          make LIBDL=-ldl
           make -C apps/basic
       - name: Format
         run: |
