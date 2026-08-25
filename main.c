@@ -643,6 +643,7 @@ static void scan_code(void) {
             scan_exec_code((char *)addr_start, (size_t)addr_end - addr_start,
                            mem_prot, path);
           }
+          free(path);
           break;
         }
       }
@@ -681,6 +682,8 @@ static void rewrite_code(void) {
         if (!((mprotect_addr <= addr) &&
               (addr < mprotect_addr + page_size()))) {
           /* mprotect is active, but the address is out-of-bounds */
+          __builtin___clear_cache((char *)mprotect_addr,
+                                  (char *)(mprotect_addr + page_size()));
           assert(!mprotect((void *)mprotect_addr, page_size(), mprotect_prot));
           mprotect_addr = UINTPTR_MAX;
           mprotect_prot = 0;
@@ -703,6 +706,8 @@ static void rewrite_code(void) {
     }
 
     if (mprotect_active) {
+      __builtin___clear_cache((char *)mprotect_addr,
+                              (char *)(mprotect_addr + page_size()));
       assert(!mprotect((void *)mprotect_addr, page_size(), mprotect_prot));
       mprotect_addr = UINTPTR_MAX;
       mprotect_prot = 0;
@@ -744,6 +749,8 @@ static void setup_syscall_table(void) {
   syscall_table = svc_table;
   syscall_table_size = svc_table_size;
 
+  __builtin___clear_cache((char *)svc_table,
+                          (char *)svc_table + svc_table_size);
   assert(!mprotect(svc_table, svc_table_size, PROT_EXEC));
 }
 
@@ -768,14 +775,23 @@ static void setup_trampoline(void) {
 
     assert(entry->trampoline == NULL);
 
-    /* allocate memory at the aligned reachable address */
+    /* Request a reachable address without replacing an existing mapping. */
     void *trampoline = MAP_FAILED;
-    for (uintptr_t addr = range_min; addr < range_max; addr += page_size()) {
+    for (uintptr_t addr = range_min; addr <= range_max - mem_size;
+         addr += page_size()) {
       trampoline = mmap((void *)addr, mem_size, PROT_READ | PROT_WRITE,
-                        MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
-      if (trampoline != MAP_FAILED) {
+                        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+      if (trampoline == MAP_FAILED) {
+        continue;
+      }
+
+      const uintptr_t mapped_addr = (uintptr_t)trampoline;
+      if (range_min <= mapped_addr && mapped_addr <= range_max - mem_size) {
         break;
       }
+
+      assert(!munmap(trampoline, mem_size));
+      trampoline = MAP_FAILED;
     }
 
     if (trampoline == MAP_FAILED) {
@@ -861,6 +877,8 @@ static void setup_trampoline(void) {
      * configures this memory region as eXecute-Only-Memory (XOM).
      * this enables to cause a segmentation fault for a NULL pointer access.
      */
+    __builtin___clear_cache((char *)entry->trampoline,
+                            (char *)entry->trampoline + mem_size);
     assert(!mprotect(entry->trampoline, mem_size, PROT_EXEC));
   }
 }
