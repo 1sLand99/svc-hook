@@ -48,11 +48,44 @@ jobs:
           usesh: true
           prepare: |
             pkg install -y llvm
+            mkdir -p /proc
+            mount | grep -q ' on /proc ' || mount -t procfs proc /proc
           run: |
             make clean
             make -C apps/basic clean
             make
             make -C apps/basic
+            LIBSVCHOOK=./apps/basic/libsvchook_basic.so LD_PRELOAD=./libsvchook.so /usr/bin/true | grep "output from hook_function"
+            make fmt
+            make -C apps/basic fmt
+            test -z "$(git status --porcelain)"
+  netbsd-build:
+    name: NetBSD Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build on NetBSD
+        uses: vmactions/netbsd-vm@v1
+        with:
+          arch: aarch64
+          usesh: true
+          prepare: |
+            export PKG_PATH="ftp://ftp.NetBSD.org/pub/pkgsrc/packages/$(uname -s)/$(uname -p)/$(uname -r)/All"
+            /usr/sbin/pkg_add -U -v pkgin
+            /usr/pkg/bin/pkgin update
+            /usr/pkg/bin/pkgin -y install clang
+            /bin/mkdir -p /proc
+            /sbin/mount | grep -q ' on /proc type procfs' || /sbin/mount -t procfs procfs /proc
+            /sbin/sysctl -w security.pax.mprotect.global=0
+          run: |
+            make clean
+            make -C apps/basic clean
+            make
+            make -C apps/basic
+            LIBSVCHOOK=./apps/basic/libsvchook_basic.so LD_PRELOAD=./libsvchook.so /usr/bin/true | grep "output from hook_function"
             make fmt
             make -C apps/basic fmt
             test -z "$(git status --porcelain)"
@@ -78,7 +111,7 @@ jobs:
           export PATH=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
           make clean
           make -C apps/basic clean
-          make
+          make LIBDL=-ldl
           make -C apps/basic
       - name: Format
         run: |

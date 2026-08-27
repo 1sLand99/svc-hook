@@ -14,8 +14,6 @@ svc-hook is a system call hook mechanism for ARM64. It is designed to be low per
 
 svc-hook supports ARM64 Linux, Android, FreeBSD, and NetBSD.
 
-Note that NetBSD support is not upstreamed yet. See: [PR#29](https://github.com/retrage/svc-hook/pull/29).
-
 ## Build
 
 svc-hook has no external dependencies.
@@ -56,6 +54,16 @@ LIBSVCHOOK=./apps/basic/libsvchook_basic.so LD_PRELOAD=./libsvchook.so [target]
 ```
 
 Replace `[target]` with the binary whose system calls you wish to hook.
+
+FreeBSD and NetBSD require procfs to be mounted at `/proc`. NetBSD also
+requires PaX mprotect restrictions to be disabled before starting the target:
+
+```shell
+sysctl -w security.pax.mprotect.global=0
+```
+
+On Linux systems whose glibc runtime linker enables memory sealing, add
+`GLIBC_TUNABLES=glibc.rtld.seal=0` to the environment.
 
 #### Example Output
 
